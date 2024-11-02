@@ -10,6 +10,19 @@ import random
 name = "unittest"
 
 
+class dummy_net_if_stats:
+
+    def __init__(self):
+        self.isup = True
+
+
+class dummy_net_if_addrs:
+    def __init__(self):
+        self.family = AF_INET
+        self.address = dummy_ip
+        self.netmask = "255.255.255.0"
+
+
 @pytest.fixture()
 def dummy_ip():
     return ".".join(map(str, (random.randint(0, 255) for _ in range(4))))
@@ -25,9 +38,22 @@ def dummy_socket():
     return MagicMock()
 
 
+
+
 @pytest.fixture()
-def dummy_pystagelinq(dummy_ip):
+def dummy_pystagelinq(dummy_ip, monkeypatch, dummy_net_if_stats, dummy_net_if_addrs):
+    dummy_psutil = MagicMock()
+
+
+
+    dummy_psutil.net_if_addrs.return_value = {"interface1": [dummy_net_if_addrs()]}
+    dummy_psutil.net_if_stats.return_value = {"interface1": dummy_net_if_stats()}
+
+    monkeypatch.setattr(PyStageLinQ.PyStageLinQ, "psutil", dummy_psutil)
+
     return PyStageLinQ.PyStageLinQ.PyStageLinQ(None, name=name, ip=dummy_ip)
+
+    monkeypatch.delattr(PyStageLinQ.PyStageLinQ, "psutil")
 
 
 @pytest.fixture(autouse=True)
@@ -58,7 +84,8 @@ def test_init_values(dummy_pystagelinq, dummy_ip):
     assert (
         type(dummy_pystagelinq.device_list) is PyStageLinQ.PyStageLinQ.Device.DeviceList
     )
-    assert dummy_pystagelinq.ip == [dummy_ip]
+    assert dummy_pystagelinq.listen_ips == [dummy_ip]
+    assert dummy_pystagelinq.transmit_ips == [dummy_ip]
 
     assert dummy_pystagelinq.tasks == set()
 
@@ -90,14 +117,26 @@ def test_init_values_ip_none(monkeypatch, dummy_socket):
         "interface3": [ifutils_net_if_addrs(ip="9.10.11.12")],
     }
 
+
     dummy_ips["interface3"][0].family = None
 
-    dummy_psutil.net_if_addrs.return_value = dummy_ips
+    dummy_stats = {
+        "interface1": [ifutils_net_if_addrs(ip="1.2.3.4")],
+        "interface2": [ifutils_net_if_addrs(ip="5.6.7.8")],
+        "interface3": [ifutils_net_if_addrs(ip="9.10.11.12")],
+    }
+
+
+
+    dummy_psutil.net_if_addrs.return_value = {dummy_ips}
+    dummy_psutil.net_if_stats.return_value = {dummy_stats}
+
     monkeypatch.setattr(PyStageLinQ.PyStageLinQ, "psutil", dummy_psutil)
 
     dummy_pystagelinq = PyStageLinQ.PyStageLinQ.PyStageLinQ(None, ip=None)
 
-    assert dummy_pystagelinq.ip == ["1.2.3.4", "5.6.7.8"]
+    assert dummy_pystagelinq.listen_ips == ["0.0.0.0"]
+    assert dummy_pystagelinq.transmit_ips == ["1.2.3.4", "5.6.7.8"]
 
 
 def test_start_standalone(dummy_pystagelinq, monkeypatch):

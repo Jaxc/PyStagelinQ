@@ -8,7 +8,9 @@ import socket
 import time
 import asyncio
 import logging
+import platform
 import psutil
+import ipaddress
 from typing import Callable
 
 from . import Device
@@ -64,16 +66,47 @@ class PyStageLinQ:
 
         self.device_list = Device.DeviceList()
 
-        self.ip = []
+        self.transmit_ips=[]
+        self.listen_ips=[]
+        interfaces = [psutil.net_if_addrs(), psutil.net_if_stats()]
         if ip is None:
-            interfaces = psutil.net_if_addrs()
-            for interface in interfaces.items():
-                for interface_address in interface[1]:
-                    if socket.AF_INET == interface_address.family:
-                        self.ip.append(interface_address.address)
+            self.listen_ips = ["0.0.0.0"]
+            for interface in interfaces[1].items():
+                if interface[1].isup is True:
+                    for interface_address in interfaces[0][interface[0]]:
+                        if socket.AF_INET == interface_address.family:
+                            self.transmit_ips.append(self.get_transmission_addr(interface_address.address, interface_address.netmask))
 
         else:
-            self.ip = [ip]
+            if type(ip) is list:
+                ip_match = False
+                for interface in interfaces[1].items():
+                    if interface[1].isup is True:
+                        for interface_address in interfaces[0][interface[0]]:
+                            if socket.AF_INET == interface_address.family:
+                                if interface_address.address in ip:
+                                    ip_match = True
+                                    self.transmit_ips.append(self.get_transmission_addr(interface_address.address,
+                                                                                        interface_address.netmask))
+                                    self.listen_ips.append(interface_address.address)
+                if ip_match is False:
+                    logger.error(f"Requested IP cannot be found on any active interface")
+                    raise ValueError
+
+            elif type(ip) is str:
+                ip_match = False
+                for interface in interfaces[1].items():
+                    if interface[1].isup is True:
+                        for interface_address in interfaces[0][interface[0]]:
+                            if socket.AF_INET == interface_address.family:
+                                if interface_address.address == ip:
+                                    self.transmit_ips.append(self.get_transmission_addr(interface_address.address,
+                                                                                        interface_address.netmask))
+                                    self.listen_ips.append(ip)
+                                    ip_match = True
+                if ip_match is False:
+                    logger.error(f"Requested IP cannot be found on any active interface")
+                    raise ValueError
 
         self.tasks = set()
         self.found_services = []
@@ -88,6 +121,20 @@ class PyStageLinQ:
         self.new_device_found_callback = new_device_found_callback
 
         logger.debug(f"Initialized!")
+
+    @staticmethod
+    def get_transmission_addr(addr, netmask):
+        transmission_addr = None
+        match platform.system():
+            case "Linux":
+                transmission_addr=ipaddress.IPv4Network(addr + '/' + netmask, False).broadcast_address
+            case "Windows":
+                transmission_addr=addr
+            case _:
+                logger.error(f"Unknown OS.")
+                raise NotImplementedError
+        return transmission_addr
+
 
     def start_standalone(self):
         """
@@ -126,7 +173,7 @@ class PyStageLinQ:
         self._send_discovery_frame(discovery_frame)
 
     def _send_discovery_frame(self, discovery_frame):
-        for ip in self.ip:
+        for ip in self.transmit_ips:
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as discovery_socket:
                 discovery_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
                 discovery_socket.bind((ip, 0))
@@ -149,6 +196,7 @@ class PyStageLinQ:
         """
         This function is used to find StageLinQ device announcements.
         """
+
         logger.info(f"Trying to discover StageLinQ devices.")
 
         # Local Constants
@@ -156,16 +204,17 @@ class PyStageLinQ:
 
         # Create socket
         discover_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
         try:
             discover_socket.bind(
-                ("255.255.255.255", self.StageLinQ_discovery_port)
-            )  # bind socket StageLinQ interface
-        except:
+                (host_ip, self.StageLinQ_discovery_port)
+            )  # bind socket to broadcast
+        except Exception as e:
             # Cannot bind to socket, check if IP is correct and link is up
             logger.warning(
                 f"Cannot bind to IP socket: {host_ip} on port {self.StageLinQ_discovery_port}"
             )
-            return PyStageLinQError.CANNOTBINDSOCKET
+            raise e
         discover_socket.setblocking(False)
 
         loop_timeout = time.time() + timeout
@@ -209,7 +258,7 @@ class PyStageLinQ:
             if time.time() > loop_timeout:
                 # No devices found within timeout
                 logger.info(
-                    "No discovery frames found on {host_ip} last {timeout} seconds."
+                    f"No discovery frames found on {host_ip} last {timeout} seconds."
                 )
                 return PyStageLinQError.DISCOVERYTIMEOUT
 
@@ -297,10 +346,10 @@ class PyStageLinQ:
     async def _py_stagelinq_strapper(self):
         strapper_tasks = set()
         logger.info(
-            f"Looking for discovery frames on {len(self.ip)} IP local IP addresses:"
+            f"Looking for discovery frames on {len(self.listen_ips)} IP local IP addresses:"
         )
 
-        for ip in self.ip:
+        for ip in self.listen_ips:
             logger.info(f"{ip}")
             strapper_tasks.add(
                 asyncio.create_task(self._discover_stagelinq_device(ip, timeout=2))
